@@ -40,17 +40,19 @@ def report_month(month):
                                   for name in Supporter.iter_entities(['Annual']))
     monthlies = collections.Counter(Supporter(name).status(month)
                                     for name in Supporter.iter_entities(['Monthly']))
-    eannuals = collections.Counter(Supporter(name).months_expired(month)
-                                  for name in Supporter.iter_entities(['Annual']))
-    emonthlies = collections.Counter(Supporter(name).months_expired(month)
-                                    for name in Supporter.iter_entities(['Monthly']))
+    eannuals = collections.Counter(
+               min((Supporter(name).months_expired_at_return(month) + 2) // 3, 5)
+               for name in Supporter.iter_entities(['Annual']))
+    emonthlies = collections.Counter(
+                 min((Supporter(name).months_expired_at_return(month) + 2) // 3, 5)
+                 for name in Supporter.iter_entities(['Monthly']))
     return ((month.strftime(MONTH_FMT),)
             + ((annuals + monthlies)[Supporter.STATUS_NEW],)
-            + ((eannuals + emonthlies)[Supporter.RETURNING_0MO],)
-            + ((eannuals + emonthlies)[Supporter.RETURNING_3MO],)
-            + ((eannuals + emonthlies)[Supporter.RETURNING_6MO],)
-            + ((eannuals + emonthlies)[Supporter.RETURNING_9MO],)
-            + ((eannuals + emonthlies)[Supporter.RETURNING_12MO],))
+            + ((eannuals + emonthlies)[1],)
+            + ((eannuals + emonthlies)[2],)
+            + ((eannuals + emonthlies)[3],)
+            + ((eannuals + emonthlies)[4],)
+            + ((eannuals + emonthlies)[5],))
 
 def main(arglist):
     args = parse_arguments(arglist)
