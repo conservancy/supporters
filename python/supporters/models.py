@@ -75,6 +75,13 @@ class Supporter:
     STATUS_LAPSED = 'Lapsed'
     STATUS_LOST = 'Lost'
 
+    RETURNING_0MO = 'ReturningAfter0-3monthLapse'
+    RETURNING_3MO = 'ReturningAfter3-6monthLapse'
+    RETURNING_6MO = 'ReturningAfter6-9monthLapse'
+    RETURNING_9MO = 'ReturningAfter9-12monthLapse'
+    RETURNING_12MO = 'ReturningAfter>12monthLapse'
+    RETURNING_NOT = 'NotReturning'
+
     LOST_THRESHOLD = datetime.timedelta(days=365)
     LAPSED_THRESHOLD = datetime.timedelta()
 
@@ -131,6 +138,11 @@ class Supporter:
                                           self._supporter_type(payments))
     lapse_date = _expose(_lapse_date)
 
+    def _second_last_lapse_date(self, payments):
+        # TODO: find a way without listification - needed due to indexing
+        return self._calculate_lapse_date(list(payments)[-2].date,
+                                          self._supporter_type(payments))
+
     def status(self, as_of_date=None):
         if as_of_date is None:
             as_of_date = Date.today()
@@ -148,3 +160,47 @@ class Supporter:
             return self.STATUS_NEW
         else:
             return self.STATUS_ACTIVE
+
+    def months_expired(self, as_of_date=None):
+        if as_of_date is None:
+            as_of_date = Date.today()
+        payments = self.payments(as_of_date)
+        payments_count = payments.count()
+        if payments_count == 0:
+            return None
+        lapse_date = self._lapse_date(payments)
+        days_past_due = as_of_date - lapse_date
+
+        if as_of_date.adjust_month(-1, 1) < payments.first().date <= as_of_date:
+            return self.RETURNING_NOT  # started paying this month so not "returning"
+
+        elif as_of_date.adjust_month(-1, 1) < payments.last().date <= as_of_date:
+            # (there are at least 2 payments because first().date != last().date)
+            if payments.last().date <= self._second_last_lapse_date(payments):
+
+                # the most recent payment was this month, and it was before or on
+                #  the lapse date for the last payment (i.e. it was "on-time") so
+                #  this is a normal active subscriber, not a "re-"subscriber
+                return self.RETURNING_NOT
+            else:
+                # the most recent payment was this month, and it was after the lapse
+                #  date for the last payment (so this is a "re-"subscriber)
+
+                # let's see how far past due the payment was, and return accordingly
+                last_past_due = (payments.last().date
+                                 - self._second_last_lapse_date(payments))
+
+                # TODO: use real month boundaries (approximating ok, but not great)
+                if last_past_due < datetime.timedelta(days=91):
+                    return self.RETURNING_0MO
+                elif last_past_due < datetime.timedelta(days=183):
+                    return self.RETURNING_3MO
+                elif last_past_due < datetime.timedelta(days=274):
+                    return self.RETURNING_6MO
+                elif last_past_due < datetime.timedelta(days=365):
+                    return self.RETURNING_9MO
+                else:
+                    return self.RETURNING_12MO
+        else:
+            # supporter lapsed/lost or an annual supporter who paid 2-12 months ago
+            return self.RETURNING_NOT
