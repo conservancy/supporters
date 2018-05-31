@@ -1,0 +1,795 @@
+#!/usr/bin/env python3
+"""donors2csv: Generate a spreadsheet of donor information.
+
+This reads a file of contact information from PayPal and cross-references it
+against a Ledger to generate a spreadsheet of donor information.
+
+The reason it uses the PayPal contact information file and not the supporters
+database is because the contact information is updated with every new donation,
+while addresses in the supporters database are not (as of May 2018).
+"""
+#
+# Copyright 2018 Brett Smith <brettcsmith@brettcsmith.org>
+# Licensed under the GNU Affero General Public License, version 3,
+# or (at your option) any later version.
+
+import argparse
+import collections
+import contextlib
+import csv
+import datetime
+import decimal
+import itertools
+import logging
+import operator
+import pathlib
+import re
+import subprocess
+import sys
+
+try:
+    import babel.numbers
+    from import2ledger import strparse
+    from import2ledger.hooks import add_entity
+except ImportError:
+    ENTITY_HOOK = None
+else:
+    ENTITY_HOOK = add_entity.AddEntityHook(None)
+
+logger = logging.getLogger('conservancy.contacts')
+
+ISO_DATE_FMT = '%Y-%m-%d'
+REPORT_ATTRIBUTES = (
+    'entity',
+    'display_name',
+    'first_name',
+    'last_name',
+    'email',
+    'address_name',
+    'address',
+    'city',
+    'region',
+    'postcode',
+    'country_code',
+    'country_name',
+    'payer_country',
+    'payment_count',
+    'payment_total',
+    'payment_programs',
+    'first_payment_date',
+    'first_payment_amount',
+    'first_payment_program',
+    'last_payment_date',
+    'last_payment_amount',
+    'last_payment_program',
+)
+
+class Payee:
+    PAYPAL_FIELDS = {
+        'PayerDisplayName': 'display_name',
+        'ADD_Name': 'address_name',
+        'LastName': 'last_name',
+        'FirstName': 'first_name',
+        'Payer': 'email',
+        'CityName': 'city',
+        'StateOrProvince': 'region',
+        'PostalCode': 'postcode',
+        'Country': 'country_code',
+        'CountryName': 'country_name',
+        'PayerCountry': 'payer_country',
+    }
+
+    def __init__(self, entity):
+        self.entity = entity
+        self.display_name = None
+        self.address_name = None
+        self.last_name = None
+        self.first_name = None
+        self.email = None
+        self.address = None
+        self.city = None
+        self.region = None
+        self.postcode = None
+        self.country_code = None
+        self.country_name = None
+        self.payer_country = None
+        self.payment_count = 0
+        self.payment_total = decimal.Decimal()
+        self.payment_programs = set()
+        self.first_payment_date = None
+        self.first_payment_amount = None
+        self.first_payment_program = None
+        self.last_payment_date = None
+        self.last_payment_amount = None
+        self.last_payment_program = None
+
+    def update_from_paypal_contact(self, contact_data):
+        for data_key, attr_name in self.PAYPAL_FIELDS.items():
+            try:
+                setattr(self, attr_name, contact_data[data_key])
+            except KeyError:
+                pass
+        address = []
+        for n in itertools.count(1):
+            try:
+                address.append(contact_data['Street{}'.format(n)].strip())
+            except KeyError:
+                break
+        if address:
+            self.address = '\n'.join(address)
+
+    def add_payment(self, date, amount, program):
+        self.payment_count += 1
+        self.payment_total += amount
+        self.payment_programs.add(program)
+        if (self.first_payment_date is None) or (self.first_payment_date > date):
+            self.first_payment_date = date
+            self.first_payment_amount = amount
+            self.first_payment_program = program
+        if (self.last_payment_date is None) or (self.last_payment_date < date):
+            self.last_payment_date = date
+            self.last_payment_amount = amount
+            self.last_payment_program = program
+
+
+class PayeeCache:
+    def __init__(self):
+        self._cache = {}
+
+    @staticmethod
+    def _entity_from(thing):
+        return getattr(thing, 'entity', thing)
+
+    def __contains__(self, elem):
+        return self._entity_from(elem) in self._cache
+
+    def __iter__(self):
+        return iter(self._cache.values())
+
+    def get_or_create(self, entity, factory=Payee):
+        try:
+            return self._cache[entity]
+        except KeyError:
+            self._cache[entity] = factory(entity)
+            return self._cache[entity]
+
+
+class CSVReport:
+    _format_date = operator.methodcaller('strftime', '%Y-%m-%d')
+    _format_unsorted = lambda seq: '\n'.join(sorted(seq))
+    _format_usd = lambda d: babel.numbers.format_currency(abs(d), 'USD')
+
+    FORMATTERS = {
+        'payment_programs': _format_unsorted,
+        'payment_total': _format_usd,
+        'first_payment_date': _format_date,
+        'first_payment_amount': _format_usd,
+        'last_payment_date': _format_date,
+        'last_payment_amount': _format_usd,
+    }
+
+    def __init__(self, attr_names, column_names=None):
+        if column_names is None:
+            column_names = [name.replace('_', ' ').title()
+                            for name in attr_names]
+        self.attr_names = attr_names
+        self.column_names = column_names
+
+    def _format_cell(self, payee, attr_name):
+        value = getattr(payee, attr_name)
+        if value is None:
+            return value
+        try:
+            formatter = self.FORMATTERS[attr_name]
+        except KeyError:
+            return value
+        else:
+            return formatter(value)
+
+    def write(self, out_file, payees):
+        writer = csv.writer(out_file)
+        writer.writerow(self.column_names)
+        for payee in payees:
+            writer.writerow(tuple(self._format_cell(payee, attr_name)
+                                  for attr_name in self.attr_names))
+
+
+Country = collections.namedtuple(
+    'Country', ('code_un', 'code2', 'code3', 'name', 'capital'),
+)
+
+NAPostcode = collections.namedtuple(
+    'NAPostcode', ('code2', 'name'),
+)
+
+def _read_misc_data(factory, lines):
+    return [factory(line.rstrip('\n').split(':')) for line in lines if
+            line and (not line.isspace()) and (not line.startswith('#'))]
+
+# The big strings below are the contents of the corresponding GNU miscfiles.
+# Note that they're under GPLv2+.
+COUNTRIES = _read_misc_data(Country._make, """
+# UN Code number: 2 letter ISO abbrev : 3 letter ISO abbrev : name : capital
+004:AF:AFG:Afghanistan:Kabul
+248:AX:ALA:Åland Islands:Mariehamn
+008:AL:ALB:Albania:Tirana
+012:DZ:DZA:Algeria:Algiers
+016:AS:ASM:American Samoa:Pago Pago
+020:AD:AND:Andorra:Andorra la Vella
+024:AO:AGO:Angola:Luanda
+660:AI:AIA:Anguilla:The Valley
+010:AQ:ATA:Antarctica:
+028:AG:ATG:Antigua and Barbuda:St. John's
+032:AR:ARG:Argentina:Buenos Aires
+051:AM:ARM:Armenia:Yerevan
+533:AW:ABW:Aruba:Oranjestad
+036:AU:AUS:Australia:Canberra
+040:AT:AUT:Austria:Vienna
+031:AZ:AZE:Azerbaijan:Baku
+044:BS:BHS:Bahamas:Nassau
+048:BH:BHR:Bahrain:Manama
+050:BD:BGD:Bangladesh:Dhaka
+052:BB:BRB:Barbados:Bridgetown
+112:BY:BLR:Belarus:Minsk
+056:BE:BEL:Belgium:Brussels
+084:BZ:BLZ:Belize:Belmopan
+204:BJ:BEN:Benin:Porto-Novo (official capital), Cotonou (seat of government)
+060:BM:BMU:Bermuda:Hamilton
+064:BT:BTN:Bhutan:Thimphu
+068:BO:BOL:Bolivia:La Paz (seat of government), Sucre (legal capital and seat of judiciary)
+070:BA:BIH:Bosnia and Herzegovina:Sarajevo
+072:BW:BWA:Botswana:Gaborone
+074:BV:BVT:Bouvet Island:
+076:BR:BRA:Brazil:Brasilia
+086:IO:IOT:British Indian Ocean Territory:Diego Garcia
+092:VG:VGB:British Virgin Islands:Road Town
+096:BN:BRN:Brunei Darussalam:Bandar Seri Begawan
+100:BG:BGR:Bulgaria:Sofia
+854:BF:BFA:Burkina Faso:Ouagadougou
+108:BI:BDI:Burundi:Bujumbura
+116:KH:KHM:Cambodia:Phnom Penh
+120:CM:CMR:Cameroon:Yaoundé
+124:CA:CAN:Canada:Ottawa
+132:CV:CPV:Cape Verde:Praia
+136:KY:CYM:Cayman Islands:George Town
+140:CF:CAF:Central African Republic:Bangui
+148:TD:TCD:Chad:N'Djamena
+830:::Channel Islands:
+152:CL:CHL:Chile:Santiago
+156:CN:CHN:China:Beijing
+162:CX:CXR:Christmas Island:The Settlement
+166:CC:CCK:Cocos (Keeling) Islands:West Island
+170:CO:COL:Colombia:Bogota
+174:KM:COM:Comoros:Moroni
+178:CG:COG:Congo:Brazzaville
+184:CK:COK:Cook Islands:Avarua
+188:CR:CRI:Costa Rica:San José
+384:CI:CIV:Côte d'Ivoire:Yamoussoukro (official capital), Abidjan (administrative center)
+191:HR:HRV:Croatia:Zagreb
+192:CU:CUB:Cuba:Havana
+196:CY:CYP:Cyprus:Nicosia
+203:CZ:CZE:Czech Republic:Prague
+408:KP:PRK:Democratic People's Republic of Korea:Pyongyang
+180:CD:COD:Democratic Republic of the Congo:Kinshasa
+208:DK:DNK:Denmark:Copenhagen
+262:DJ:DJI:Djibouti:Djibouti
+212:DM:DMA:Dominica:Roseau
+214:DO:DOM:Dominican Republic:Santo Domingo
+218:EC:ECU:Ecuador:Quito
+818:EG:EGY:Egypt:Cairo
+222:SV:SLV:El Salvador:San Salvador
+226:GQ:GNQ:Equatorial Guinea:Malabo
+232:ER:ERI:Eritrea:Asmara
+233:EE:EST:Estonia:Tallinn
+231:ET:ETH:Ethiopia:Addis Ababa
+234:FO:FRO:Faeroe Islands:Tórshavn
+238:FK:FLK:Falkland Islands (Malvinas):Stanley
+583:FM:FSM:Federated States of Micronesia:Palikir
+242:FJ:FJI:Fiji:Suva
+246:FI:FIN:Finland:Helsinki
+250:FR:FRA:France:Paris
+254:GF:GUF:French Guiana:Cayenne
+258:PF:PYF:French Polynesia:Papeete
+260:TF:ATF:French Southern Territories:
+266:GA:GAB:Gabon:Libreville
+270:GM:GMB:Gambia:Banjul
+268:GE:GEO:Georgia:T'bilisi
+276:DE:DEU:Germany:Berlin
+288:GH:GHA:Ghana:Accra
+292:GI:GIB:Gibraltar:Gibraltar
+300:GR:GRC:Greece:Athens
+304:GL:GRL:Greenland:Nuuk
+308:GD:GRD:Grenada:St. George's
+312:GP:GLP:Guadeloupe:Basse-Terre
+316:GU:GUM:Guam:Hagåtña
+320:GT:GTM:Guatemala:Guatemala
+324:GN:GIN:Guinea:Conakry
+624:GW:GNB:Guinea-Bissau:Bissau
+328:GY:GUY:Guyana:Georgetown
+332:HT:HTI:Haiti:Port-au-Prince
+334:HM:HMD:Heard Island and McDonald Islands:
+336:VA:VAT:Holy See:Vatican City
+340:HN:HND:Honduras:Tegucigalpa
+344:HK:HKG:Hong Kong Special Administrative Region of China:
+348:HU:HUN:Hungary:Budapest
+352:IS:ISL:Iceland:Reykjavik
+356:IN:IND:India:New Delhi
+360:ID:IDN:Indonesia:Jakarta
+364:IR:IRN:Iran:Tehran
+368:IQ:IRQ:Iraq:Baghdad
+372:IE:IRL:Ireland:Dublin
+833:::Isle of Man:Douglas
+376:IL:ISR:Israel:Jerusalem
+380:IT:ITA:Italy:Rome
+388:JM:JAM:Jamaica:Kingston
+392:JP:JPN:Japan:Tokyo
+400:JO:JOR:Jordan:'Amman
+398:KZ:KAZ:Kazakhstan:Astana
+404:KE:KEN:Kenya:Nairobi
+296:KI:KIR:Kiribati:Tarawa
+414:KW:KWT:Kuwait:Kuwait
+417:KG:KGZ:Kyrgyzstan:Bishkek
+418:LA:LAO:Lao People's Democratic Republic:Vientiane
+428:LV:LVA:Latvia:Riga
+422:LB:LBN:Lebanon:Beirut
+426:LS:LSO:Lesotho:Maseru
+430:LR:LBR:Liberia:Monrovia
+434:LY:LBY:Libyan Arab Jamahiriya:Tripoli
+438:LI:LIE:Liechtenstein:Vaduz
+440:LT:LTU:Lithuania:Vilnius
+442:LU:LUX:Luxembourg:Luxembourg
+446:MO:MAC:Macau Special Administrative Region of China:
+450:MG:MDG:Madagascar:Antananarivo
+454:MW:MWI:Malawi:Lilongwe
+458:MY:MYS:Malaysia:Kuala Lumpur (official), Putrajaya (administrative)
+462:MV:MDV:Maldives:Malé
+466:ML:MLI:Mali:Bamako
+470:MT:MLT:Malta:Valletta
+584:MH:MHL:Marshall Islands:Majuro
+474:MQ:MTQ:Martinique:Fort-de-France
+478:MR:MRT:Mauritania:Nouakchott
+480:MU:MUS:Mauritius:Port Louis
+175:YT:MYT:Mayotte:Mamoutzou
+484:MX:MEX:Mexico:Mexico
+492:MC:MCO:Monaco:Monaco
+496:MN:MNG:Mongolia:Ulaanbaatar
+500:MS:MSR:Montserrat:Plymouth (abandoned), Brades Estate (interim)
+504:MA:MAR:Morocco:Rabat
+508:MZ:MOZ:Mozambique:Maputo
+104:MM:MMR:Myanmar:Rangoon
+516:NA:NAM:Namibia:Windhoek
+520:NR:NRU:Nauru:
+524:NP:NPL:Nepal:Kathmandu
+528:NL:NLD:Netherlands:Amsterdam (official), The Hague (seat of government)
+530:AN:ANT:Netherlands Antilles:Willemstad
+540:NC:NCL:New Caledonia:Noumea
+554:NZ:NZL:New Zealand:Wellington
+558:NI:NIC:Nicaragua:Managua
+562:NE:NER:Niger:Niamey
+566:NG:NGA:Nigeria:Abuja
+570:NU:NIU:Niue:Alofi
+574:NF:NFK:Norfolk Island:Kingston
+580:MP:MNP:Northern Mariana Islands:Saipan
+578:NO:NOR:Norway:Oslo
+275:PS:PSE:Occupied Palestinian Territory:
+512:OM:OMN:Oman:Muscat
+586:PK:PAK:Pakistan:Islamabad
+585:PW:PLW:Palau:Koror
+591:PA:PAN:Panama:Panama
+598:PG:PNG:Papua New Guinea:Port Moresby
+600:PY:PRY:Paraguay:Asunción
+604:PE:PER:Peru:Lima
+608:PH:PHL:Philippines:Manila
+612:PN:PCN:Pitcairn:Adamstown
+616:PL:POL:Poland:Warsaw
+620:PT:PRT:Portugal:Lisbon
+630:PR:PRI:Puerto Rico:San Juan
+634:QA:QAT:Qatar:Doha
+410:KR:KOR:Republic of Korea:Seoul
+498:MD:MDA:Republic of Moldova:Chișinău
+638:RE:REU:Réunion:Saint-Denis
+642:RO:ROU:Romania:Bucharest
+643:RU:RUS:Russian Federation:Moscow
+646:RW:RWA:Rwanda:Kigali
+654:SH:SHN:Saint Helena:Jamestown
+659:KN:KNA:Saint Kitts and Nevis:Basseterre
+662:LC:LCA:Saint Lucia:Castries
+666:PM:SPM:Saint Pierre and Miquelon:Saint-Pierre
+670:VC:VCT:Saint Vincent and the Grenadines:Kingstown
+882:WS:WSM:Samoa:Apia
+674:SM:SMR:San Marino:San Marino
+678:ST:STP:São Tomé and Príncipe:São Tomé
+682:SA:SAU:Saudi Arabia:Riyadh
+686:SN:SEN:Senegal:Dakar
+891:CS:SCG:Serbia and Montenegro:Belgrade
+690:SC:SYC:Seychelles:Victoria
+694:SL:SLE:Sierra Leone:Freetown
+702:SG:SGP:Singapore:Singapore
+703:SK:SVK:Slovakia:Bratislava
+705:SI:SVN:Slovenia:Ljubljana
+090:SB:SLB:Solomon Islands:Honiara
+706:SO:SOM:Somalia:Mogadishu
+710:ZA:ZAF:South Africa:Pretoria (official), Cape Town (legislative), Bloemfontein (judicial)
+239:GS:SGS:South Georgia and the South Sandwich Islands:
+724:ES:ESP:Spain:Madrid
+144:LK:LKA:Sri Lanka:Colombo (official), Sri Jayewardenepura Kotte (legislative)
+736:SD:SDN:Sudan:Khartoum
+740:SR:SUR:Suriname:Paramaribo
+744:SJ:SJM:Svalbard and Jan Mayen Islands:Longyearbyen
+748:SZ:SWZ:Swaziland:Mbabane (official), Lobamba (royal and legislative)
+752:SE:SWE:Sweden:Stockholm
+756:CH:CHE:Switzerland:Bern
+760:SY:SYR:Syrian Arab Republic:Damascus
+158:TW:TWN:Taiwan, Province of China:Taipei
+762:TJ:TJK:Tajikistan:Dushanbe
+764:TH:THA:Thailand:Bangkok
+807:MK:MKD:The former Yugoslav Republic of Macedonia:Skopje
+626:TL:TLS:Timor-Leste:Dili
+768:TG:TGO:Togo:Lome
+772:TK:TKL:Tokelau:
+776:TO:TON:Tonga:Nuku'alofa
+780:TT:TTO:Trinidad and Tobago:Port-of-Spain
+788:TN:TUN:Tunisia:Tunis
+792:TR:TUR:Turkey:Ankara
+795:TM:TKM:Turkmenistan:Ashgabat
+796:TC:TCA:Turks and Caicos Islands:Cockburn Town
+798:TV:TUV:Tuvalu:Funafuti (offcial), Vaiaku Village (administrative)
+800:UG:UGA:Uganda:Kampala
+804:UA:UKR:Ukraine:Kiev
+784:AE:ARE:United Arab Emirates:Abu Dhabi
+826:GB:GBR:United Kingdom of Great Britain and Northern Ireland:London
+834:TZ:TZA:United Republic of Tanzania:Dodoma
+581:UM:UMI:United States Minor Outlying Islands:
+840:US:USA:United States of America:Washington, DC
+850:VI:VIR:United States Virgin Islands:Charlotte Amalie
+858:UY:URY:Uruguay:Montevideo
+860:UZ:UZB:Uzbekistan:Tashkent
+548:VU:VUT:Vanuatu:Port Vila
+862:VE:VEN:Venezuela:Caracas
+704:VN:VNM:Viet Nam:Hanoi
+876:WF:WLF:Wallis and Futuna Islands:Mata-Utu
+732:EH:ESH:Western Sahara:Laâyoune
+887:YE:YEM:Yemen:Sanaa
+894:ZM:ZMB:Zambia:Lusaka
+716:ZW:ZWE:Zimbabwe:Harare
+""".splitlines())
+
+NA_POSTCODES = _read_misc_data(NAPostcode._make, """
+# Postal codes
+#
+# Code : Region
+
+# American States
+AL:Alabama
+AK:Alaska
+AZ:Arizona
+AR:Arkansas
+CA:California
+CO:Colorado
+CT:Connecticut
+DE:Delaware
+FL:Florida
+GA:Georgia
+HI:Hawaii
+ID:Idaho
+IL:Illinois
+IN:Indiana
+IA:Iowa
+KS:Kansas
+KY:Kentucky
+LA:Louisiana
+ME:Maine
+MD:Maryland
+MA:Massachusetts
+MI:Michigan
+MN:Minnesota
+MS:Mississippi
+MO:Missouri
+MT:Montana
+NE:Nebraska
+NV:Nevada
+NH:New Hampshire
+NJ:New Jersey
+NM:New Mexico
+NY:New York
+NC:North Carolina
+ND:North Dakota
+OH:Ohio
+OK:Oklahoma
+OR:Oregon
+PA:Pennsylvania
+RI:Rhode Island
+SC:South Carolina
+SD:South Dakota
+TN:Tennessee
+TX:Texas
+UT:Utah
+VT:Vermont
+VA:Virginia
+WA:Washington
+WV:West Virginia
+WI:Wisconsin
+WY:Wyoming
+
+# American Possessions
+AS:American Samoa
+DC:District of Columbia
+FM:Federated States of Micronesia
+GU:Guam
+MH:Marshall Islands
+MP:Northern Mariana Islands
+PW:Palau
+PR:Puerto Rico
+VI:Virgin Islands
+
+# American military
+AE:Armed Forces Africa
+AA:Armed Forces Americas
+AE:Armed Forces Canada
+AE:Armed Forces Europe
+AE:Armed Forces Middle East
+AP:Armed Forces Pacific
+
+# Canadian Provinces
+AB:Alberta
+BC:British Columbia
+MB:Manitoba
+NB:New Brunswick
+NL:Newfoundland
+NS:Nova Scotia
+NT:Northwest Territories
+NU:Nunavut
+ON:Ontario
+PE:Prince Edward Island
+QC:Quebec
+SK:Saskatchewan
+YT:Yukon
+""".splitlines())
+
+class Filters:
+    SEARCH_ALIASES = {
+        'state': 'region',
+        'province': 'region',
+    }
+
+    def __init__(self):
+        self.tests = {
+            'entity_defined': lambda payee: payee.entity is not None,
+        }
+        self.regions = set()
+        self.country_names = set()
+        self.country_codes = set()
+        self.since_date = None
+
+    def parse_and_add(self, s):
+        key, _, value = s.partition('=')
+        if (not key) or (not value):
+            raise ValueError("malformed match criteria {!r}".format(s))
+        key = key.lower()
+        key = self.SEARCH_ALIASES.get(key, key)
+        try:
+            self.tests[key] = getattr(self, '{}_test'.format(key))(value)
+        except AttributeError:
+            raise ValueError("unknown match criteria {!r}".format(key))
+
+    def _normalize_s(self, s):
+        if s is None:
+            return None
+        else:
+            return re.sub(r'\s+', ' ', s.strip().lower())
+
+    def _matching_locations(self, needle, haystack):
+        return [loc for loc in haystack if any(s.lower() == needle for s in loc)]
+
+    def region_test(self, value):
+        needle = self._normalize_s(value)
+        regions = self._matching_locations(needle, NA_POSTCODES)
+        if regions:
+            self.regions.update(region.code2.lower() for region in regions)
+            self.regions.update(region.name.lower() for region in regions)
+        else:
+            self.regions.add(needle)
+        return self.filter_on_region
+
+    def filter_on_region(self, payee):
+        return self._normalize_s(payee.region) in self.regions
+
+    def country_test(self, value):
+        needle = self._normalize_s(value)
+        countries = self._matching_locations(needle, COUNTRIES)
+        if countries:
+            self.country_codes.update(country.code2.lower() for country in countries)
+            self.country_names.update(country.name.lower() for country in countries)
+        else:
+            self.country_codes.add(needle)
+            self.country_names.add(needle)
+        return self.filter_on_country
+
+    def filter_on_country(self, payee):
+        return (
+            self._normalize_s(payee.country_code) in self.country_codes
+            or self._normalize_s(payee.country_name) in self.country_names
+        )
+
+    def since_test(self, s):
+        since_date = strparse.date(s, ISO_DATE_FMT)
+        self.since_date = s
+        return lambda payee: (
+            payee.last_payment_date is not None
+            and payee.last_payment_date >= since_date
+        )
+
+    def payee_passes(self, payee):
+        return all(test(payee) for test in self.tests.values())
+
+    def filter_payees(self, payees):
+        for payee in payees:
+            if self.payee_passes(payee):
+                yield payee
+
+
+def read_paypal_contacts(in_file, payees):
+    contact_data = {}
+    for line in in_file:
+        if re.match(r'^#+$', line):
+            try:
+                contact_data['payee'] = '{FirstName} {LastName}'.format_map(contact_data)
+            except KeyError:
+                pass
+            else:
+                ENTITY_HOOK.run(contact_data)
+                payee = payees.get_or_create(contact_data['entity'])
+                payee.update_from_paypal_contact(contact_data)
+            contact_data = {}
+        else:
+            key, _, value = line.partition(':')
+            contact_data[key] = value.strip()
+
+def read_ledger_payments(in_file, payees):
+    for row in csv.reader(in_file):
+        date = strparse.date(row[1], ISO_DATE_FMT)
+        amount = decimal.Decimal(row[2].lstrip('$ ').replace(',', ''))
+        payee = payees.get_or_create(row[0])
+        payee.add_payment(date, amount, row[3])
+
+def parse_arguments(arglist):
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""You can use the following search criteria (omit the brackets):
+
+  country=[2-letter or 3-letter country code, or name]
+  state=[2-letter North American postal code, or name]
+  province=[name]
+  since=[YYYY-MM-DD]
+
+For example, to find all donors in Kentucky who donated since mid-2017:
+
+  donors2csv paypal-contacts.txt state=ky since=2017-07-01
+
+Only donors that match all given criteria are included in the output.
+""",
+    )
+    parser.add_argument(
+        '--loglevel',
+        choices=['debug', 'info', 'warning', 'error', 'critical'],
+        default='warning',
+        help=argparse.SUPPRESS,  # Loggingi not implemented yet
+        # help="Show log messages from this level (default %(default)s)",
+    )
+    parser.add_argument(
+        '--ledger-file',
+        type=pathlib.Path,
+        help="Path to the Ledger file to cross-reference against."
+        " Default guessed from the contacts file path.",
+    )
+    parser.add_argument(
+        '--output-file', '-O',
+        type=pathlib.Path,
+        help="Path to write the CSV spreadsheet."
+        " Default determined from match criteria.",
+    )
+    parser.add_argument(
+        '--overwrite',
+        action='store_const',
+        dest='output_mode',
+        const='w',
+        default='x',
+        help="Overwrite the --output-file if it already exists",
+    )
+    parser.add_argument(
+        'contacts_file',
+        type=pathlib.Path,
+        help="Path to a paypal-contacts.txt file",
+    )
+    parser.add_argument(
+        'conditions',
+        nargs=argparse.REMAINDER,
+        help="Only include contacts that match these criteria",
+    )
+    args = parser.parse_args(arglist)
+    args.filters = Filters()
+    for filter_s in args.conditions:
+        try:
+            args.filters.parse_and_add(filter_s)
+        except ValueError as error:
+            parser.error("{}: {}".format(filter_s, error.args[0]))
+    args.loglevel = getattr(logging, args.loglevel.upper())
+    if args.ledger_file is None:
+        ledger_name = args.contacts_file.name.replace('-paypal-contacts', '')
+        args.ledger_file = args.contacts_file.with_name(ledger_name).with_suffix('.ledger')
+    if args.output_file is None:
+        output_parts = []
+        regions_count = len(args.filters.regions)
+        if regions_count == 1:
+            output_parts.append(next(iter(args.filters.regions)))
+        elif regions_count > 1:
+            output_parts.append('-'.join(s.upper() for s in sorted(args.filters.regions) if len(s) == 2))
+        if args.filters.country_codes:
+            output_parts.append('-'.join(s.upper() for s in sorted(args.filters.country_codes)))
+        output_parts.append('Conservancy-contacts')
+        if args.filters.since_date:
+            output_parts.append('since-' + args.filters.since_date)
+        args.output_file = pathlib.Path('_'.join(output_parts)).with_suffix('.csv')
+    return args
+
+def setup_logger(logger, loglevel, stream):
+    formatter = logging.Formatter('%(name)s: %(levelname)s: %(message)s')
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    logger.setLevel(loglevel)
+
+def main(arglist=None, stdout=sys.stdout, stderr=sys.stderr):
+    args = parse_arguments(arglist)
+
+    if ENTITY_HOOK is None:
+        print(
+            "Error: Failed to find the import2ledger module for supporting code.",
+            "Please download it from",
+            "<https://k.sfconservancy.org/NPO-Accounting/import2ledger>",
+            "and follow the instructions in the README to install it.",
+            sep='\n', file=stderr,
+        )
+        return 4
+
+    setup_logger(logger, args.loglevel, stderr)
+    payees = PayeeCache()
+
+    with args.contacts_file.open() as contacts_file:
+        read_paypal_contacts(contacts_file, payees)
+
+    with subprocess.Popen(
+            ['ledger', '--args-only', 'csv',
+             '-V',
+             '--file', str(args.ledger_file),
+             '--csv-format', "%(quoted(meta('Entity'))),%(format_date(date, '%Y-%m-%d')),%(quoted(display_amount)),%(quoted(meta('Program')))\n",
+             'Income:Conservancy:Donations',
+            ],
+            stdout=subprocess.PIPE,
+            universal_newlines=True,
+    ) as proc:
+        read_ledger_payments(proc.stdout, payees)
+    if proc.returncode != 0:
+        logger.error("couldn't read payment data: ledger exited %s", proc.returncode)
+        return 5
+
+    report = CSVReport(REPORT_ATTRIBUTES)
+    with contextlib.ExitStack() as stack:
+        if str(args.output_file) == '-':
+            out_file = stdout
+        else:
+            out_file = stack.enter_context(args.output_file.open(args.output_mode))
+        report.write(out_file, args.filters.filter_payees(payees))
+    print("Output saved to", str(args.output_file), file=stderr)
+    return 0
+
+if __name__ == '__main__':
+    try:
+        exit(main())
+    except OSError as error:
+        error_parts = ["Error"]
+        if error.filename:
+            error_parts.append("Could not open {}".format(error.filename))
+        error_parts.append(error.strerror)
+        print(": ".join(error_parts), file=sys.stderr)
+        exit(3)
