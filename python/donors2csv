@@ -740,8 +740,6 @@ def setup_logger(logger, loglevel, stream):
     logger.setLevel(loglevel)
 
 def main(arglist=None, stdout=sys.stdout, stderr=sys.stderr):
-    args = parse_arguments(arglist)
-
     if ENTITY_HOOK is None:
         print(
             "Error: Failed to find the import2ledger module for supporting code.",
@@ -752,6 +750,7 @@ def main(arglist=None, stdout=sys.stdout, stderr=sys.stderr):
         )
         return 4
 
+    args = parse_arguments(arglist)
     setup_logger(logger, args.loglevel, stderr)
     payees = PayeeCache()
 
