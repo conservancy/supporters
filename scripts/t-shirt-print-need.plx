@@ -12,46 +12,49 @@ use LaTeX::Encode;
 use Supporters;
 
 my $LEDGER_CMD = "/usr/bin/ledger";
-if (@ARGV < 2) {
+if (@ARGV < 7) {
   
-  print STDERR "usage: $0 <SUPPORTERS_SQLITE_DB_FILE> <GIVING_LIMIT>\n";
+  print STDERR "usage: $0 <SUPPORTERS_SQLITE_DB_FILE> <GIVING_LIMIT> <MONTHLY_SEARCH_REGEX> <ANNUAL_SEARCH_REGEX>  <VERBOSE> <LEDGER_CMD_LINE>\n";
   exit 1;
 }
 my @typeList = qw/t-shirt-0 t-shirt-1 t-shirt-extra-0 t-shirt-fy2018design-0/;
 my %requests = ( soon => {}, now => {} );
-%{$requests{now}} =  map( { ($_, {}) }, @typeList);
-%{$requests{soon}} =  map( { ($_, {}) }, @typeList);
+%{$requests{now}} =  map { ($_, {}) } @typeList;
+%{$requests{soon}} =  map { ($_, {}) } @typeList;
 
 
-my($SUPPORTERS_SQLITE_DB_FILE, $GIVING_LIMIT, $VERBOSE, @LEDGER_CMD_LINE) = @ARGV;
-foreach my $id (sort { sortFunction($a, $b); } @supporterIds) {
-  my $sizeNeeded;
-  my $type;
-  foreach $type (keys %requests) {
+my($SUPPORTERS_SQLITE_DB_FILE, $GIVING_LIMIT, $MONTHLY_SEARCH_REGEX, $ANNUAL_SEARCH_REGEX,, @LEDGER_CMD_LINE) = @ARGV;
+
+my $dbh = DBI->connect("dbi:SQLite:dbname=$SUPPORTERS_SQLITE_DB_FILE", "", "",
+                               { RaiseError => 1, sqlite_unicode => 1 })
+  or die $DBI::errstr;
+
+my $sp = new Supporters($dbh, \@LEDGER_CMD_LINE, { monthly => $MONTHLY_SEARCH_REGEX, annual => $ANNUAL_SEARCH_REGEX});
+my(@supporterIds) = $sp->findDonor({});
+foreach my $id (sort { $a <=> $b } @supporterIds) {
+  foreach my $type (keys %{$requests{now}}) {
+    my $sizeNeeded;
     my $request = $sp->getRequest({ donorId => $id, requestType => $type,
                                     ignoreHeldRequests => 1, ignoreFulfilledRequests => 1 });
     if (defined $request and defined $request->{requestType}) {
       $sizeNeeded = $request->{requestConfiguration};
-      last;
+      my $amount = $sp->donorTotalGaveInPeriod(donorId => $id);
+      my $when = ($amount < $GIVING_LIMIT) ? "soon" : "now";
+      $requests{$when}{$type}{$sizeNeeded} = 0 unless defined $requests{$when}{$type}{$sizeNeeded};
+      $requests{$when}{$type}{$sizeNeeded}++;
+      print STDERR "t-shirt-1 in $sizeNeeded wanted $when by $id\n" if ($type eq 't-shirt-1');
     }
-  }
-  next if not defined $sizeNeeded;   # If we don't need a size, we don't have a request.
-  my $amount = $sp->donorTotalGaveInPeriod(donorId => $id);
-  if ($amount < $GIVING_LIMIT) {
-    $requests{soon}{$type}{$sizeNeeded}++;
-  } else {
-    $requests{now}{$type}{$sizeNeeded}++;
   }
 }
 
 foreach my $key ('now', 'soon') {
-  print "\n\nREQUESTS READY FOR FUFILLMENT", uc($key), ":\n";
-}
-foreach my $type (keys %{$requests{$key}}) {
-  if (scalar(keys %{$requests{$key}{$type}}) > 0) {
-    print "   $type:\n";
-    foreach my $size (keys %{$requests{$key}{$type}}) {
-      print "      $size: $request{$key}{$type}{$size}\n";
+  print "\n\nREQUESTS READY FOR FUFILLMENT ", uc($key), ":\n";
+  foreach my $type (keys %{$requests{$key}}) {
+    if (scalar(keys %{$requests{$key}{$type}}) > 0) {
+      print "   $type:\n";
+      foreach my $size (keys %{$requests{$key}{$type}}) {
+        print "      $size: $requests{$key}{$type}{$size}\n";
+      }
     }
   }
 }
