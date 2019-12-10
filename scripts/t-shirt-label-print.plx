@@ -121,6 +121,7 @@ foreach my $id (sort { sortFunction($a, $b); } @supporterIds) {
     my(@postalAddresses) = $sp->getPostalAddresses($id);
     $postalAddress = $postalAddresses[0];
   }
+  my(@arrayPostal) = split("\n", $postalAddress);
   my $latexPostal = latex_encode($postalAddress);
   $latexPostal =~ s/\\unmatched\{0141\}/\L{}/g;
   $latexPostal =~ s/\\unmatched\{0142\}/\l{}/g;
@@ -137,10 +138,12 @@ foreach my $id (sort { sortFunction($a, $b); } @supporterIds) {
   $overallCount++;
   $lines{$sizeNeeded}{labels} = "" unless defined $lines{$sizeNeeded}{labels};
   $lines{$sizeNeeded}{checklist} = [] unless defined $lines{$sizeNeeded}{checklist};
+  $lines{$sizeNeeded}{addressList} = [] unless defined $lines{$sizeNeeded}{addressList};
   $lines{$sizeNeeded}{labels} .= '\mlabel{}{TO: \\\\ ' . join(' \\\\ ', split('\n', $latexPostal)) . "}\n";
   my $shortLatexPostal = latex_encode(sprintf('%-30.30s', join(" ", reverse split('\n', $postalAddress))));
   $shortLatexPostal =~ s/\\unmatched\{0141\}/\L{}/g;
   $shortLatexPostal =~ s/\\unmatched\{0142\}/\l{}/g;
+  push(@{$lines{$sizeNeeded}{addressList}}, { id => $id, address => \@arrayPostal });
   push(@{$lines{$sizeNeeded}{checklist}}, '{ $\Box$} &' . sprintf("%-3d  & %5s & %-30s  & %s ",
                                                   $id, encode('UTF-8', $sp->getLedgerEntityId($id)),
                                                   encode('UTF-8', $sizeNeeded),
@@ -148,6 +151,7 @@ foreach my $id (sort { sortFunction($a, $b); } @supporterIds) {
                                                     '\\\\ \hline' . "\n");
 }
 my $lineCount = 0;
+my @allAddresses;
 foreach my $size (sort { $a cmp $b } keys %lines) {
   foreach my $line (@{$lines{$size}{checklist}}) {
     if ($lineCount++ > 40) {
@@ -156,8 +160,10 @@ foreach my $size (sort { $a cmp $b } keys %lines) {
     }
     print LIST $line;
   }
+  push(@allAddresses, @{$lines{$size}{addressList}});
   print LABELS $lines{$size}{labels};
   delete $lines{$size}{labels};
+  delete $lines{$size}{addressList};
 }
 
 print LIST "\n\n", '\end{tabular}',"\n";
