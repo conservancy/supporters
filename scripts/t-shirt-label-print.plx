@@ -1,4 +1,5 @@
 #!/usr/bin/perl
+# License: AGPL-3.0-or-later
 
 use strict;
 use warnings;
