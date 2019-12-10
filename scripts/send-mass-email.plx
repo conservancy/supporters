@@ -37,9 +37,14 @@ close EMAIL;
 
 my(@supporterIds) = $sp->findDonor({});
 foreach my $id (@supporterIds) {
+  my $donorType = $self->getType($id);
   my $expiresOn = $sp->supporterExpirationDate($id);
   my $isLapsed = ( (not defined $expiresOn) or $expiresOn lt $TODAY);
-  #  next unless $expiresOn lt "2017-02-01";
+
+  my $amount = $sp->donorTotalGaveInPeriod(donorId => $id);
+  my $lastGaveDate = $sp->donorLastGave($id);
+  my $firstGaveDate = $sp->donorFirstGave($id);
+  my $nineMonthsSinceFirstGave = UnixDate(DateCalc(ParseDate($firstGaveDate), "+ 9 months"), '%Y-%m-%d');
 
 
   # invalid email address
