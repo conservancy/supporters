@@ -18,8 +18,13 @@ my $encoder = Email::MIME::RFC2047::Encoder->new();
 
 my $TODAY = UnixDate(ParseDate("today"), '%Y-%m-%d');
 my $FORTY_FIVE_DAYS_AGO = UnixDate(ParseDate("45 days ago"), '%Y-%m-%d');
+my $SIXTY_DAYS_AGO = UnixDate(ParseDate("60 days ago"), '%Y-%m-%d');
+my $NINETY_DAYS_AGO = UnixDate(ParseDate("90 days ago"), '%Y-%m-%d');
 my $ONE_AND_HALF_YEARS_AGO = UnixDate(ParseDate("18 months ago"), '%Y-%m-%d');
 my $NINE_MONTHS_AGO = UnixDate(ParseDate("9 months ago"), '%Y-%m-%d');
+my $FIFTEEN_MONTHS_AGO = UnixDate(ParseDate("15 months ago"), '%Y-%m-%d');
+my $THREE_TWENTY_DAYS_AGO = UnixDate(ParseDate("320 days ago"), '%Y-%m-%d');
+my $END_LAST_YEAR = '2017-12-31';
 
 if (@ARGV < 5) {
   print STDERR "usage: $0 <SUPPORTERS_SQLITE_DB_FILE> <FROM_ADDRESS> <EMAIL_TEMPLATE_SUFFIX> <BAD_ADDRESS_LIST_FILE> <MONTHLY_SEARCH_REGEX> <ANNUAL_SEARCH_REGEX>  <VERBOSE> <LEDGER_CMD_LINE> <LEDGER_COMMAND_LINE>\n";
