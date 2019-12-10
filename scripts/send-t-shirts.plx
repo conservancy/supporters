@@ -132,9 +132,7 @@ Thank you again for your support of Conservancy.
 
 Sincerely,
 -- 
-Karen M. Sandler, Executive Director, Software Freedom Conservancy
-    and
-Bradley M. Kuhn, Distinguished Technologist, Software Freedom Conservancy
+The Staff at Software Freedom Conservancy
 DATA
   close SENDMAIL;
   die "Unable to send email to $id: $!" unless $? == 0;
