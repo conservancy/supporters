@@ -36,9 +36,13 @@ my $dbh = DBI->connect("dbi:SQLite:dbname=$SUPPORTERS_SQLITE_DB_FILE", "", "",
 
 my $sp = new Supporters($dbh, \@LEDGER_CMD_LINE, { monthly => $MONTHLY_SEARCH_REGEX, annual => $ANNUAL_SEARCH_REGEX});
 
-# open(EMAIL, "<", $EMAIL_CONTENTS_FILE);
-# my(@emailLines) = <EMAIL>;
-# close EMAIL;
+my %groupLines;
+foreach my $group (1 .. 3) {
+  $groupLines{$group} = [];
+  open(my $emailFH, "<", "group-${group}" . $EMAIL_TEMPLATE_SUFFIX);
+  @{$groupLines{$group}} = <$emailFH>;
+  close $emailFH;
+}
 
 my %skip = ();
 sub update_skips {
@@ -71,32 +75,93 @@ foreach my $id (@supporterIds) {
   my $firstGaveDate = $sp->donorFirstGave($id);
   my $nineMonthsSinceFirstGave = UnixDate(DateCalc(ParseDate($firstGaveDate), "+ 9 months"), '%Y-%m-%d');
   my $group = 0;
+  # staff testing code:
 
   if (not $sp->emailOk($id)) {
     print "NOT-SENT: SUPPORTER $id: has requested no email contact\n";
     $groupCounts{$group}++;
     next;
   }
-  if ($donorType eq 'monthly' and $lastGaveDate lt $FORTY_FIVE_DAYS_AGO ) {
+  # if ($lastGaveDate le $END_LAST_YEAR) {
+  #   $group = 1;
+  # } elsif ($lastGaveDate gt $END_LAST_YEAR) {
+  #   $group = 0;
+  # if ( ($donorType eq 'monthly' and $lastGaveDate lt $SIXTY_DAYS_AGO ) or
+  #      ($donorType eq 'annual' and $lastGaveDate lt $THREE_TWENTY_DAYS_AGO) )
+  #      {
+  #   $group = 1;
+  if ($donorType eq 'monthly' and $lastGaveDate ge $NINETY_DAYS_AGO) {
     $group = 1;
-  } elsif ($donorType eq 'annual' and
-           $lastGaveDate lt $NINE_MONTHS_AGO and $lastGaveDate gt $ONE_AND_HALF_YEARS_AGO) {
+  } elsif ( ($donorType eq 'monthly' and $lastGaveDate ge $NINETY_DAYS_AGO) or
+            $donorType eq 'annual' and $lastGaveDate ge $FIFTEEN_MONTHS_AGO) {
     $group = 2;
-  } elsif ($donorType eq 'annual' and $lastGaveDate ge $NINE_MONTHS_AGO) {
+  } elsif ( ($donorType eq 'monthly' and $lastGaveDate lt $NINETY_DAYS_AGO) or
+            $donorType eq 'annual' and $lastGaveDate lt $FIFTEEN_MONTHS_AGO) {
     $group = 3;
-  } elsif ( ($donorType eq 'annual' and $lastGaveDate le $ONE_AND_HALF_YEARS_AGO) or
-            ($donorType eq 'monthly' and $lastGaveDate le $NINE_MONTHS_AGO) ) {
-    $group = 4;
-  } elsif ($donorType eq 'monthly' and $lastGaveDate gt $NINE_MONTHS_AGO
-          and $lastGaveDate ge $FORTY_FIVE_DAYS_AGO) {
-    $group = 5;
+  # } elsif ($donorType eq 'annual' and $lastGaveDate ge $THREE_TWENTY_DAYS_AGO) {
+  #   $group = 3;
+  # } elsif ( ($donorType eq 'annual' and $lastGaveDate le $ONE_AND_HALF_YEARS_AGO) or
+  #           ($donorType eq 'monthly' and $lastGaveDate le $NINE_MONTHS_AGO) ) {
+  #   $group = 4;
+  # } elsif ($donorType eq 'monthly' and $lastGaveDate gt $NINE_MONTHS_AGO
+  #         and $lastGaveDate le $FORTY_FIVE_DAYS_AGO) {
+  #   $group = 5;
+  } else {
+    die "Supporter $id: not in a group, $donorType who last gave on $lastGaveDate";
   }
   if ($group <= 0) {
     print "NOT-SENT: SUPPORTER $id: Fit in no specified group: Type: $donorType, Last Gave: $lastGaveDate\n";
-    $group = 0;
-  } else {
-    print "SENT: SUPPORTER $id: Group $group\n";
+    $groupCounts{0}++;
+    next;
   }
+  # Staff testing code 
+   # next unless ($id == 20 or $id == 34);  # $id == 26
+   # $group = 3 if $id == 34;
+  my %emails;
+  
+  my $email = $sp->getPreferredEmailAddress($id);
+  if (defined $email) {
+    $emails{$email} = {};
+  } else {
+    %emails = $sp->getEmailAddresses($id);
+  }
+  my @badEmails;
+  foreach $email (keys %emails) {
+    if (defined $skip{$email}) {
+      delete $emails{$email};
+      push(@badEmails, $email);
+    }
+  }
+  if (scalar(keys %emails) <= 0) {
+    print "NOT-SENT: SUPPORTER $id: these email address(es) is/were bad: ",
+      join(",", @badEmails), "\n";
+      $groupCounts{0}++;
+    next;
+  }
+  my(@emails) = keys(%emails);
+
+  my $fullEmailLine = "";
+  my $emailTo = join(' ', @emails);
+  my $displayName = $sp->getDisplayName($id);
+  foreach my $email (@emails) {
+    $fullEmailLine .= ", " if ($fullEmailLine ne "");
+    my $line = "";
+    if (defined $displayName) {
+      $line .= $encoder->encode_phrase($displayName) . " ";
+    }
+    $line .= "<$email>";
+    $fullEmailLine .= $line;
+  }
+  print "SENT: SUPPORTER $id: Group $group: ", join(",", @emails), "\n";
+
+  open(my $sendmailFH, "|-", '/usr/lib/sendmail', '-f', $FROM_ADDDRESS, '-oi', '-oem', '--',
+       @emails);
+
+
+  print $sendmailFH "To: $fullEmailLine\n";
+  print $sendmailFH @{$groupLines{$group}};
+  close $sendmailFH;
+  usleep(60000);
   $groupCounts{$group}++;
 }
 print "\n\n";
@@ -107,36 +172,6 @@ foreach my $group (sort keys %groupCounts) {
 }
 print "\n\nTOTAL EMAILS SENT: $totalSent\n";
 
-#   my %emails;
-#   my $email = $sp->getPreferredEmailAddress($id);
-#   if (defined $email) {
-#     $emails{$email} = {};
-#   } else {
-#     %emails = $sp->getEmailAddresses($id);
-#   }
-#   my(@emails) = keys(%emails);
-
-#   my $fullEmailLine = "";
-#   my $emailTo = join(' ', @emails);
-#   my $displayName = $sp->getDisplayName($id);
-#   foreach my $email (@emails) {
-#     $fullEmailLine .= ", " if ($fullEmailLine ne "");
-#     my $line = "";
-#     if (defined $displayName) {
-#       $line .= $encoder->encode_phrase($displayName) . " ";
-#     }
-#     $line .= "<$email>";
-#     $fullEmailLine .= $line;
-#   }
-#   open(SENDMAIL, "|-", "/usr/lib/sendmail -f \"$FROM_ADDDRESS\" -oi -oem -- \'$emailTo\'");
-
-
-#   print SENDMAIL "To: $fullEmailLine\n";
-#   print SENDMAIL @emailLines;
-#   close SENDMAIL;
-
-#   print STDERR "Emailed $emailTo with $id who expires on $expiresOn\n" if ($VERBOSE);
-# }
 ###############################################################################
 #
 # Local variables:
