@@ -7,8 +7,11 @@ use autodie qw(open close);
 use DBI;
 use Encode qw(encode decode);
 
+use Email::MIME::RFC2047::Encoder;
+use Email::MIME;
 use Supporters;
 
+my $encoder = Email::MIME::RFC2047::Encoder->new();
 my $LEDGER_CMD = "/usr/local/bin/ledger";
 
 if (@ARGV != 5 and @ARGV != 6) {
@@ -16,7 +19,7 @@ if (@ARGV != 5 and @ARGV != 6) {
   exit 1;
 }
 
-my($SUPPORTERS_SQLITE_DB_FILE, $WHO, $HOW, $TEX_FILE, $VERBOSE) = @ARGV;
+my($SUPPORTERS_SQLITE_DB_FILE, $T_SHIRT_TYPE,  $WHO, $HOW, $TEX_FILE, $VERBOSE) = @ARGV;
 $VERBOSE = 0 if not defined $VERBOSE;
 
 my $dbh = DBI->connect("dbi:SQLite:dbname=$SUPPORTERS_SQLITE_DB_FILE", "", "",
@@ -75,39 +78,40 @@ foreach my $id (sort keys %idsSent) {
     next;
   }
   next unless $sp->emailOk($id);
-  my @emails;
-  my $preferredEmail = $sp->getPreferredEmailAddress($id);
-  if (defined $preferredEmail) {
-    push(@emails, $preferredEmail);
+  my %emails;
+  my $email = $sp->getPreferredEmailAddress($id);
+  if (defined $email) {
+    $emails{$email} = {};
   } else {
-    my(%emailData) = $sp->getEmailAddresses($id);
-    (@emails) = keys %emailData;
+    %emails = $sp->getEmailAddresses($id);
   }
+  my(@emails) = keys(%emails);
+
   my $fullEmailLine = "";
   my $emailTo = join(' ', @emails);
   my $displayName = $sp->getDisplayName($id);
-  print "Email to:$emailTo, displayName $displayName\n";
   foreach my $email (@emails) {
     $fullEmailLine .= ", " if ($fullEmailLine ne "");
     my $line = "";
     if (defined $displayName) {
-      $line .= "\"$displayName\" ";
+      $line .= $encoder->encode_phrase($displayName) . " ";
     }
     $line .= "<$email>";
-    $fullEmailLine .= Encode::encode("MIME-Header", $line);
+    $fullEmailLine .= $line;
   }
 
-  my $fromAddress = 'info@sfconservancy.org';
+  my $fromAddress = 'supporters@tix.sfconservancy.org';
   my $pingNoGet = "";
   $pingNoGet = "\nPlease ping us if you do not receive your t-shirt within two weeks in the\nUSA, or three weeks outside of the USA.\n\n"
   if ($HOW =~ /post/);
-
-  open(SENDMAIL, "|/usr/lib/sendmail -f \"$fromAddress\" -oi -oem -- $emailTo $fromAddress") or
+  open(SENDMAIL, "|/usr/lib/sendmail -f \"$fromAddress\" -oi -oem -- $emailTo info\@sfconservancy.org") or
       die "unable to run sendmail: $!";
   print SENDMAIL <<DATA;
 To: $fullEmailLine
 From: "Software Freedom Conservancy" <$fromAddress>
 Subject: $sizesSent Conservancy T-Shirt was $HOW
+
+[ We apologize if you get a duplicate of this notification. ]
 
 According to our records, the t-shirt of size $sizesSent that you
 requested as a Conservancy Supporter was $HOW.
