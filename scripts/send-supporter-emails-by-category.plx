@@ -4,6 +4,7 @@
 
 use strict;
 use warnings;
+use Time::HiRes qw(usleep nanosleep);
 
 use autodie qw(open close);
 use DBI;
