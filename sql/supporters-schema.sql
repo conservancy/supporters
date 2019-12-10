@@ -67,6 +67,13 @@ CREATE TABLE "request_type" (
     "type"   varchar(100) NOT NULL
     );
 
+DROP TABLE IF EXISTS "delivery_error";
+
+CREATE TABLE "delivery_error" (
+    "id" integer NOT NULL PRIMARY KEY,
+    "error" varchar(300) NOT NULL UNIQUE
+    );
+
 DROP TABLE IF EXISTS "email_address";
 
 CREATE TABLE "email_address" (
@@ -74,6 +81,15 @@ CREATE TABLE "email_address" (
     "email_address" varchar(300) NOT NULL UNIQUE,
     "type_id" integer,
     "date_encountered" date NOT NULL
+    );
+
+DROP TABLE IF EXISTS "email_error_log";
+
+CREATE TABLE "email_error_log" (
+    "email_address_id" integer NOT NULL,
+    "delivery_error_code_id" integer NOT NULL,
+    "date_encountered" date NOT NULL,
+    "comments" TEXT
     );
 
 DROP TABLE IF EXISTS "donor_email_address_mapping";
