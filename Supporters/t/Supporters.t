@@ -973,7 +973,29 @@ lives_ok { %emailAddresses = $sp->getEmailAddresses($campbellId); }
 is_deeply(\%emailAddresses, {},
           "getEmailAddresses: ... and returns correct results.");
 
-# FIXME: getPostalAddresses needs unit tests.
+
+=item setPreferredEmailAddress/getPreferredEmailAddress
+
+=cut
+
+=item getPostalAddress
+
+=cut
+
+# Add additional postal address.
+
+my $drapperHomePostalId;
+
+lives_ok { $drapperHomePostalId = $sp->addPostalAddress($drapperId,
+                                                    "112 Main Street \nLong Island, NY 11000\nUSA", 'home'); }
+         "addPostalAddress: addPostalAddress of a valid formatted_address works.";
+ok((looks_like_number($drapperHomePostalId) and $drapperHomePostalId > 0), "addPostalAddress: id returned is sane.");
+
+# Force home address to have an old date
+
+$dbh->do("UPDATE postal_address SET date = '1000-01-01' WHERE id = " . $sp->dbh->quote($drapperHomePostalId));
+
+
 
 =item findDonor
 
