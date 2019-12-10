@@ -80,9 +80,14 @@ sub sortFunction($$) {
   }
 }
 my @typeList;
-if ($T_SHIRT_STYLE == 0) {
+my @oldTypeList;
+if ($T_SHIRT_STYLE eq 'fy2018design') {
+  @typeList = qw/t-shirt-fy2018design-0/;
+  @oldTypeList = qw/t-shirt-0 t-shirt-1 t-shirt-extra-0 t-shirt-extra-1/;
+} elsif ($T_SHIRT_STYLE == 0) {
   @typeList = qw/t-shirt-0 t-shirt-extra-0/; 
 } elsif ($T_SHIRT_STYLE == 1) {
+  @oldTypeList = qw/t-shirt-0 t-shirt-extra-0/;
   @typeList = qw/t-shirt-1 t-shirt-extra-1/; 
 } else {
   die "Unknown t-shirt style given: $T_SHIRT_STYLE";
@@ -100,9 +105,14 @@ foreach my $id (sort { sortFunction($a, $b); } @supporterIds) {
   }
   next if not defined $sizeNeeded;   # If we don't need a size, we don't have a request.
 
+  my $shirtCount = 1;  # Count 1 for the one we're about to send and...
+  foreach my $oldType (@oldTypeList) {
+    # ... cound each one off the old list
+    $shirtCount++ if (defined $sp->getRequest({ donorId => $id, requestType => $oldType}));
+  }
   my $amount = $sp->donorTotalGaveInPeriod(donorId => $id);
-  if ($amount < $GIVING_LIMIT) {
-    print "Skipping $id request for $sizeNeeded because donor only gave $amount and giving limit is $GIVING_LIMIT\n" if $VERBOSE;
+  if ($amount < ($GIVING_LIMIT * $shirtCount)) {
+    print "Skipping $id request for $sizeNeeded because donor has requested $shirtCount shirts, only gave $amount and giving limit is $GIVING_LIMIT\n" if $VERBOSE;
     next;
   }
 
