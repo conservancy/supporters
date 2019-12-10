@@ -186,6 +186,11 @@ print LIST "\\hline \n\n", '\end{tabular}',"\n\n\nOVERALL SENDING COUNT: $overal
 close LIST;
 close LABELS;
 
+open(my $yamlFH, '>', 'address.yml');
+use YAML::Tiny;
+my $yaml = YAML::Tiny->new(\@allAddresses);
+$yaml->write('address.yml');
+
 ###############################################################################
 #
 # Local variables:
