@@ -163,9 +163,11 @@ foreach my $id (@supporterIds) {
   open(my $sendmailFH, "|-", '/usr/lib/sendmail', '-f', $FROM_ADDDRESS, '-oi', '-oem', '--',
        @emails);
 
-
   print $sendmailFH "To: $fullEmailLine\n";
-  print $sendmailFH @{$groupLines{$group}};
+  foreach my $line (@{$groupLines{$group}}) {
+    s/FIXME_DISPLAYNAME/$displayName/g;
+    print $sendmailFH $line;
+  }
   close $sendmailFH;
   usleep(60000);
   $groupCounts{$group}++;
