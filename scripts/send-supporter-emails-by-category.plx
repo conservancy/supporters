@@ -183,6 +183,6 @@ print "\n\nTOTAL EMAILS SENT: $totalSent\n";
 ###############################################################################
 #
 # Local variables:
-# compile-command: "perl -c send-mass-email.plx"
+# compile-command: "perl -c send-supporter-emails-by-category.plx"
 # End:
 
