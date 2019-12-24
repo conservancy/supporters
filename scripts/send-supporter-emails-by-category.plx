@@ -175,7 +175,7 @@ foreach my $id (@supporterIds) {
     print $sendmailFH $thisLine;
   }
   close $sendmailFH;
-  usleep(50000);
+  usleep(70000);
   $groupCounts{$group}++;
 }
 print "\n\n";
