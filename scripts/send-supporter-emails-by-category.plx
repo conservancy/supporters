@@ -173,7 +173,7 @@ foreach my $id (@supporterIds) {
     print $sendmailFH $thisLine;
   }
   close $sendmailFH;
-  usleep(60000);
+  usleep(50000);
   $groupCounts{$group}++;
 }
 print "\n\n";
