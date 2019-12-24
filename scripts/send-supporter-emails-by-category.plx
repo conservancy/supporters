@@ -163,10 +163,14 @@ foreach my $id (@supporterIds) {
   open(my $sendmailFH, "|-", '/usr/lib/sendmail', '-f', $FROM_ADDDRESS, '-oi', '-oem', '--',
        @emails);
 
+  binmode $sendmailFH, ":utf8";
+
   print $sendmailFH "To: $fullEmailLine\n";
   foreach my $line (@{$groupLines{$group}}) {
-    s/FIXME_DISPLAYNAME/$displayName/g;
-    print $sendmailFH $line;
+    die "no displayname for this item" if not defined $displayName or $displayName =~ /^\s*$/;
+    my $thisLine = $line;   # Note: This is needed, apparently $line is by reference?
+    $thisLine =~ s/FIXME_DISPLAYNAME/$displayName/g;
+    print $sendmailFH $thisLine;
   }
   close $sendmailFH;
   usleep(60000);
