@@ -27,6 +27,7 @@ my $ONE_AND_HALF_YEARS_AGO = UnixDate(ParseDate("18 months ago"), '%Y-%m-%d');
 my $NINE_MONTHS_AGO = UnixDate(ParseDate("9 months ago"), '%Y-%m-%d');
 my $FIFTEEN_MONTHS_AGO = UnixDate(ParseDate("15 months ago"), '%Y-%m-%d');
 my $THREE_TWENTY_DAYS_AGO = UnixDate(ParseDate("320 days ago"), '%Y-%m-%d');
+my $FY_2019_FUNDRAISER_START = UnixDate(ParseDate("2019-11-26 08:00"), '%Y-%m-%d');
 my $END_LAST_YEAR = '2017-12-31';
 
 if (@ARGV < 5) {
@@ -45,7 +46,7 @@ my $dbh = DBI->connect("dbi:SQLite:dbname=$SUPPORTERS_SQLITE_DB_FILE", "", "",
 my $sp = new Supporters($dbh, \@LEDGER_CMD_LINE, { monthly => $MONTHLY_SEARCH_REGEX, annual => $ANNUAL_SEARCH_REGEX});
 
 my %groupLines;
-foreach my $group (1 .. 3) {
+foreach my $group (1 .. 2) {
   $groupLines{$group} = [];
   open(my $emailFH, "<", "group-${group}" . $EMAIL_TEMPLATE_SUFFIX);
   @{$groupLines{$group}} = <$emailFH>;
@@ -98,14 +99,13 @@ foreach my $id (@supporterIds) {
   #      ($donorType eq 'annual' and $lastGaveDate lt $THREE_TWENTY_DAYS_AGO) )
   #      {
   #   $group = 1;
-  if ($donorType eq 'monthly' and $lastGaveDate ge $NINETY_DAYS_AGO) {
+  if ($lastGaveDate le $FY_2019_FUNDRAISER_START) {
     $group = 1;
-  } elsif ( ($donorType eq 'monthly' and $lastGaveDate ge $NINETY_DAYS_AGO) or
-            $donorType eq 'annual' and $lastGaveDate ge $FIFTEEN_MONTHS_AGO) {
+  } elsif ($lastGaveDate gt $FY_2019_FUNDRAISER_START) {
     $group = 2;
-  } elsif ( ($donorType eq 'monthly' and $lastGaveDate lt $NINETY_DAYS_AGO) or
-            $donorType eq 'annual' and $lastGaveDate lt $FIFTEEN_MONTHS_AGO) {
-    $group = 3;
+#  } elsif ( ($donorType eq 'monthly' and $lastGaveDate lt $NINETY_DAYS_AGO) or
+#            $donorType eq 'annual' and $lastGaveDate lt $FIFTEEN_MONTHS_AGO) {
+#    $group = 3;
   # } elsif ($donorType eq 'annual' and $lastGaveDate ge $THREE_TWENTY_DAYS_AGO) {
   #   $group = 3;
   # } elsif ( ($donorType eq 'annual' and $lastGaveDate le $ONE_AND_HALF_YEARS_AGO) or
