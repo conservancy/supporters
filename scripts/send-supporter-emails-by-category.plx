@@ -15,6 +15,8 @@ use Encode qw(encode decode);
 use Email::MIME::RFC2047::Encoder;
 use utf8;
 
+binmode STDOUT, ":utf8";
+
 my $encoder = Email::MIME::RFC2047::Encoder->new();
 
 my $TODAY = UnixDate(ParseDate("today"), '%Y-%m-%d');
