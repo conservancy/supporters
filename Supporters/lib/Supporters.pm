@@ -52,12 +52,13 @@ Arguments:
    and pointing to the right database.  This class will take over and control
    the DBI object after C<new()> completes.
 
-=item $ledgerCmd
+=item $ledgerFH
 
-   A list reference that contains the main ledger command with any necessary
-   arguments, for looking up donation data.  The options should be presented
+   A file handle to read the data for Ledger from.  It should be presented
    such that the output is in the form:
          ProgramTag  Date   Entity   Amount
+
+   This FH will be *closed* by the supporter DB object once data is read.
 
 =item $programTypeSearch
 
@@ -72,10 +73,10 @@ Arguments:
 
 sub new ($$;$) {
   my $package = shift;
-  my($dbh, $ledgerCmd, $programTypeSearch) = @_;
+  my($dbh, $fh, $programTypeSearch) = @_;
 
-  die "new: second argument must be a list ref for the ledger command line"
-    unless (defined $ledgerCmd and ref $ledgerCmd and (reftype($ledgerCmd) eq 'ARRAY'));
+  die "new: second argument must be a file handle reference for the ledger data"
+    unless (defined $fh and ref $fh);
 
   die "new: keys annual and monthly must be the only keys in this hash"
       if defined $programTypeSearch and (not (defined $programTypeSearch->{monthly} and defined $programTypeSearch->{annual}
@@ -84,7 +85,7 @@ sub new ($$;$) {
   die "new: first argument must be a database handle"
     unless (defined $dbh and blessed($dbh) =~ /DBI/);
 
-  my $self = bless({ dbh => $dbh, ledgerCmd => $ledgerCmd },
+  my $self = bless({ dbh => $dbh, ledgerFH => $fh },
                    $package);
 
   $self->{programTypeSearch} = $programTypeSearch if defined $programTypeSearch;
@@ -113,15 +114,15 @@ sub dbh ($) {
 }
 ######################################################################
 
-=begin ledgerCmd
+=begin ledgerFH
 
 Accessor method, returns the ledger command currently used by this Supporters
 object.
 
 =cut
 
-sub ledgerCmd ($) {
-  return $_[0]->{ledgerCmd};
+sub ledgerFH ($) {
+  return $_[0]->{ledgerFH};
 }
 ######################################################################
 sub addSupporter ($$) {
@@ -1909,15 +1910,15 @@ use outside of this module.
 sub _readLedgerData($) {
   my($self) = @_;
 
-  my @cmd = @{$self->{ledgerCmd}};
+  my $fh = $self->{ledgerFH};
   my %amountTable;
 
-  open(ALL, "-|", @cmd) or confess "unable to run command ledger command: @cmd: $!";
-  while (my $line = <ALL>) {
+  while (my $line = <$fh>) {
     next if $line =~ /^\s*$/;
-    warn "Invalid line in @cmd output:\n    $line"
-      unless $line =~ /^\s*([^\d]+)\s+([\d\-]+)\s+(\S*)\s+\$\s*(\-?\s*[\d,\.]+)\s*$/;
+    warn "Invalid line in line in ledgerFH output:\n    $line"
+      unless $line =~ /^\s*([^\d]+)\s+([\d\-]+)\s+(\S*)\s+\$?\s*(\-?\s*[\d,\.]+)\s*$/;
     my($type, $date, $entityId, $amount) = ($1, $2, $3, $4);
+    print STDERR "$type, $date, $entityId, $amount\n";
     next unless defined $entityId and $entityId !~ /^\s*$/;
     if (defined $self->{programTypeSearch}) {
       if ($type =~ /$self->{programTypeSearch}{annual}/) {
@@ -1947,7 +1948,7 @@ sub _readLedgerData($) {
     $amountTable{$entityId}{__FIRST_GAVE__} = $date
       if $date lt $amountTable{$entityId}{__FIRST_GAVE__};
   }
-  close ALL; die "error($?) running command, @cmd: $!" unless $? == 0;
+  close $fh; die "error($?) reading ledger FH: $!" unless $? == 0;
   $self->{ledgerData} = \%amountTable;
 }
 
