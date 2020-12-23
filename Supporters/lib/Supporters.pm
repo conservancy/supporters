@@ -465,7 +465,7 @@ returned; it means the preferred email address wasn't selected for some reason.
 sub getPreferredEmailAddress($$) {
   my($self, $donorId) = @_;
 
-  die "setPreferredEmailAddress: invalid supporter id, $donorId" unless $self->_verifyId($donorId);
+  die "getPreferredEmailAddress: invalid supporter id, $donorId" unless $self->_verifyId($donorId);
 
   my $ems = $self->dbh()->selectall_hashref("SELECT email_address FROM email_address em, donor_email_address_mapping sem " .
                                             "WHERE preferred AND sem.email_address_id = em.id AND " .
